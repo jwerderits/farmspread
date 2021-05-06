@@ -6,6 +6,7 @@ import os
 import datetime
 import creds
 import boto3
+import sys
 pandas.set_option('display.max_columns', 500)
 pandas.set_option('display.width', 1000)
 
@@ -18,6 +19,9 @@ class Scrape:
         self.bucket_name = 'farmspread-data'
         self.today = datetime.datetime.today()
         self.current_month = datetime.datetime(self.today.year, self.today.month, 1)
+        self.fields = ['vendor.id', 'vendor.name', 'vendor.data.attended',
+            'vendor.data.sales.amount', 'vendor.data.sales.breakdown_totals',
+            'vendor.data.sales.invoice.status', 'vendor.data.sales.invoice.total']
 
     def make_request(self, url):
         response = requests.get(url, headers=self.headers)
@@ -53,6 +57,8 @@ class Scrape:
         print(f'loading file: {file_name} to bucket: {self.bucket_name}')
         s3_client.upload_file(file_path, self.bucket_name, file_name)
 
+
+    #change to current week
     def determine_date_range(self):
         start = self.current_month
         almost_last_day = start.replace(day=28) + datetime.timedelta(days=4)
@@ -70,10 +76,6 @@ class Scrape:
                     relevant_events.append(event['event_url'])
             return relevant_events
         return events
-
-    def define_structure(self):
-        self.fields = ['vendor.id', 'vendor.name', 'vendor.data.attended', 'vendor.data.sales.amount', 'vendor.data.sales.breakdown_totals',
-                   'vendor.data.sales.invoice.status', 'vendor.data.sales.invoice.total']
 
     #overwrites csv utilizing a df to remove whitespace and special chars from headers
     def clean_headers(self, dataframe):
@@ -102,7 +104,6 @@ class Scrape:
         df = pandas.json_normalize(data)
         df = df.fillna(0)
         df = df.convert_dtypes()
-        self.define_structure()
 
         df=df[self.fields]
         for stall in data:
@@ -127,10 +128,13 @@ class Scrape:
                     net = reimbursements - vendor_fee
                     if net > 0:
                         vendor_owes = 0
+                        city_seed_owes = net
                     else:
-                        vendor_owes = net
+                        vendor_owes = -net
+                        city_seed_owes = 0
+
                     reported_sales = stall['vendor']['data']['sales']['amount']
-                    checksum = (reported_sales or 0) - running_total
+                    checksum = round((reported_sales or 0) - running_total)
                     all_currencies['reported_sales'] =reported_sales
                     all_currencies['total_sales'] = running_total
                     all_currencies['checksum'] = checksum
@@ -138,6 +142,7 @@ class Scrape:
                     all_currencies['reimbursements'] = reimbursements
                     all_currencies['reimbursement_fee'] = net
                     all_currencies['vendor_owes'] = vendor_owes
+                    all_currencies['city_seed_owes'] = city_seed_owes
 
                     full_market = full_market.append(all_currencies)
         full_market.insert(1, 'market', raw_event_data['market'])
