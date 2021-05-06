@@ -17,7 +17,7 @@ class Scrape:
         self.url = creds.url
         self.cwd = os.getcwd()
         self.bucket_name = 'farmspread-data'
-        self.today = datetime.datetime.today()
+        self.today = datetime.date.today()
         self.current_month = datetime.datetime(self.today.year, self.today.month, 1)
         self.fields = ['vendor.id', 'vendor.name', 'vendor.data.attended',
             'vendor.data.sales.amount', 'vendor.data.sales.breakdown_totals',
@@ -60,18 +60,17 @@ class Scrape:
 
     #change to current week
     def determine_date_range(self):
-        start = self.current_month
-        almost_last_day = start.replace(day=28) + datetime.timedelta(days=4)
-        end = almost_last_day - datetime.timedelta(days=start.day)
-        if end > self.today:
-            end = self.today
+        end = self.today
+        start = end - datetime.timedelta(days=7)
+        if start.month < end.month:
+            start = end.replace(day=1)
         return start, end
 
     def filter_events(self, events, date_min=None, date_max=None):
         relevant_events = []
         if date_max:
             for event in events:
-                start = datetime.datetime.strptime(event['start_time'], "%Y-%m-%dT%H:%M:%S")
+                start = datetime.datetime.strptime(event['start_time'], "%Y-%m-%dT%H:%M:%S").date()
                 if start <= date_max and start >= date_min:
                     relevant_events.append(event['event_url'])
             return relevant_events
@@ -116,9 +115,11 @@ class Scrape:
                     for x, currency in enumerate(stall['vendor']['data']['sales']['breakdown']):
                         currency_type = currency['currency']
                         amount = currency['amount']
+                        vendor_id = int(stall['vendor']['id'])
                         vendor_name = stall['vendor']['name']
-                        # vendor_id = int(stall['vendor']['id'])
-                        # all_currencies['vendor_id'] = [vendor_id]
+                        transaction_id = hash(str(vendor_id) + market_date)
+                        all_currencies['transaction_id'] = transaction_id
+                        all_currencies['vendor_id'] = [vendor_id]
                         all_currencies['vendor_name'] = [vendor_name]
                         all_currencies[currency_type] = [amount]
                         running_total = running_total + (amount or 0)
@@ -135,7 +136,7 @@ class Scrape:
 
                     reported_sales = stall['vendor']['data']['sales']['amount']
                     checksum = round((reported_sales or 0) - running_total)
-                    all_currencies['reported_sales'] =reported_sales
+                    all_currencies['reported_sales'] = reported_sales
                     all_currencies['total_sales'] = running_total
                     all_currencies['checksum'] = checksum
                     all_currencies['vendor_fee'] = vendor_fee
@@ -145,8 +146,8 @@ class Scrape:
                     all_currencies['city_seed_owes'] = city_seed_owes
 
                     full_market = full_market.append(all_currencies)
-        full_market.insert(1, 'market', raw_event_data['market'])
-        full_market.insert(2, 'market_date', market_date)
+        full_market.insert(3, 'market', raw_event_data['market'])
+        full_market.insert(4, 'market_date', market_date)
 
         return full_market
 
@@ -162,7 +163,7 @@ class Scrape:
                 event_df = self.parse_events(event)
                 complete_df = complete_df.append(event_df)
 
-            file_name = f'{self.current_month.date()}.csv'
+            file_name = f'{self.today}.csv'
             file_path = f'{self.cwd}/{file_name}'
             complete_df.to_csv(file_path, index=False)
             self.load_to_s3(file_name, file_path)
