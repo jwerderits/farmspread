@@ -7,21 +7,37 @@ import datetime
 import creds
 import boto3
 import sys
+import io
+import hashlib
 pandas.set_option('display.max_columns', 500)
 pandas.set_option('display.width', 1000)
 
 
 class Scrape:
     def __init__(self):
+        self.s3_client = boto3.client('s3', aws_access_key_id=creds.aws_key, aws_secret_access_key=creds.aws_secret_key)
+        # self.end = datetime.date(2021,4,13)
         self.headers = creds.headers
         self.url = creds.url
         self.cwd = os.getcwd()
+        self.is_joinable = True
         self.bucket_name = 'farmspread-data'
         self.today = datetime.date.today()
         self.current_month = datetime.datetime(self.today.year, self.today.month, 1)
         self.fields = ['vendor.id', 'vendor.name', 'vendor.data.attended',
             'vendor.data.sales.amount', 'vendor.data.sales.breakdown_totals',
             'vendor.data.sales.invoice.status', 'vendor.data.sales.invoice.total']
+        self.join_fields = ['transaction_id', 'reimbursements',
+            'reimbursement_fee', 'vendor_owes', 'city_seed_owes']
+        self.final_columns = ['transaction_id', 'vendor_id','vendor_name', 'market',
+            'market_date', 'Voucher - CAANH HOPE Value', 'Cash', 'Charge', 'Check',
+            'CitySeed $1 Black Token Value','SNAP Matching (DVCP) Value',
+            'WIC FMNP Check Value', 'WIC FMNP Doubling Value', 'CitySeed $5 Yellow Token Value',
+            'SNAP $1 CT Logo Token Value','Sr. FMNP Doubling Value','Double Value $1 Red Token Value',
+            'Voucher - Yale','Sr. FMNP Check Value','reported_sales','total_sales',
+            'checksum','vendor_fee','reimbursements','reimbursement_fee','vendor_owes',
+            'city_seed_owes','reimbursements_change','reimbursement_fee_change',
+            'vendor_owes_change','city_seed_owes_change']
 
     def make_request(self, url):
         response = requests.get(url, headers=self.headers)
@@ -53,18 +69,19 @@ class Scrape:
         return event_list
 
     def load_to_s3(self, file_name, file_path):
-        s3_client = boto3.client('s3', aws_access_key_id=creds.aws_key, aws_secret_access_key=creds.aws_secret_key)
         print(f'loading file: {file_name} to bucket: {self.bucket_name}')
-        s3_client.upload_file(file_path, self.bucket_name, file_name)
-
+        self.s3_client.upload_file(file_path, self.bucket_name, file_name)
 
     #change to current week
     def determine_date_range(self):
-        end = self.today
-        start = end - datetime.timedelta(days=7)
-        if start.month < end.month:
-            start = end.replace(day=1)
-        return start, end
+        if not self.end:
+            self.end = self.today
+        self.start = self.end - datetime.timedelta(days=30)
+        last_week = self.end - datetime.timedelta(days=7)
+        if self.start.month < self.end.month:
+            self.start = self.end.replace(day=1)
+        if last_week.month < self.end.month:
+            self.is_joinable = False
 
     def filter_events(self, events, date_min=None, date_max=None):
         relevant_events = []
@@ -117,7 +134,7 @@ class Scrape:
                         amount = currency['amount']
                         vendor_id = int(stall['vendor']['id'])
                         vendor_name = stall['vendor']['name']
-                        transaction_id = hash(str(vendor_id) + market_date)
+                        transaction_id = str(vendor_id) + '__' + market_date
                         all_currencies['transaction_id'] = transaction_id
                         all_currencies['vendor_id'] = [vendor_id]
                         all_currencies['vendor_name'] = [vendor_name]
@@ -151,19 +168,46 @@ class Scrape:
 
         return full_market
 
+    def find_last_file(self):
+        last_week_date = self.end - datetime.timedelta(days=7)
+        last_file_name = f'{last_week_date}.csv'
+        last_week_file = self.s3_client.get_object(Bucket=self.bucket_name, Key=last_file_name)
+        df = pandas.read_csv(io.BytesIO(last_week_file['Body'].read()))
+        return df
+
+    def caluculate_differences(self, df):
+        for field in self.join_fields:
+            if field == 'transaction_id':
+                continue
+            df[f'{field}_change'] = round(df[field] - df[f'{field}_y'],2)
+        return df
+
+    def drop_extra_columns(self, df):
+        df = df[self.final_columns]
+        return df
+
+
     def do_the_thing(self):
+
             complete_df = pandas.DataFrame()
             market_list = self.find_markets(self.url)
             season_list = self.find_seasons(market_list)
             event_url = self.find_events(season_list)
-            start, end = self.determine_date_range()
-            events_to_scrape = self.filter_events(event_url, start, end)
+            self.determine_date_range()
+            events_to_scrape = self.filter_events(event_url, self.start, self.end)
             print(events_to_scrape)
             for event in events_to_scrape:
                 event_df = self.parse_events(event)
                 complete_df = complete_df.append(event_df)
+            if self.is_joinable:
+                previous_df = self.find_last_file()
+                previous_df = previous_df[self.join_fields]
+                complete_df = complete_df.merge(previous_df,how='left', on='transaction_id', suffixes=('','_y'))
+                complete_df = self.caluculate_differences(complete_df)
+                complete_df = self.drop_extra_columns(complete_df)
 
-            file_name = f'{self.today}.csv'
+
+            file_name = f'{self.end}.csv'
             file_path = f'{self.cwd}/{file_name}'
             complete_df.to_csv(file_path, index=False)
             self.load_to_s3(file_name, file_path)
